@@ -1,0 +1,6 @@
+name: testmy001
+version: 0.2.1
+author: Brian OHara
+description: Test sqljocky for MySQL
+dependencies:
+  sqljocky: '>= 0.5.8'
