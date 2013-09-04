@@ -1,0 +1,12 @@
+Database User Name .............. : admin
+Database User Password .......... : admin
+Database Name ................... : test
+Number of Insert Iterations ..... : 2000
+Frequency of Insert Rollbacks ... : 0
+Use AutoInc for Inserts (y/n) ... : y
+Number of Update Iterations ..... : 2000
+Frequency of Update Rollbacks ... : 0
+Select sample-size for updates .. : 100
+Clear Table? (y/n) .............. : n
+Save selections to file? (y/n) .. : y
+Nr. of instances you will run ... : 4

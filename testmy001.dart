@@ -56,7 +56,36 @@
 *  22-Aug-2013   Brian OHara   Reported problems with Ubuntu 13.04 32-bit on Github.
 *  
 *  24-Aug-2013   Brian OHara   Started testing on Win8. Results slow.
-*  
+*
+*  01-Sep-2013   Brian OHara   Added a rollback in main update exception & some
+*                              minor changes re input. Some calls to fRollback()
+*                              were not being treated as a Future. There appears to
+*                              have been a problem with Rollbacks.
+*                              
+*  01-Sep-2013   Brian OHara   Added the option of intentional Rollbacks for Inserts
+*                              and updates. When used, this will impact times. I will
+*                              likely enhance this option at some point.
+*                              
+*  01-Sep-2013   Brian OHara   Made some changes to error-handling.
+*                              
+*  01-Sep-2013   Brian OHara   Altered Inserts to specifically test for errors
+*                              relating to duplicate-keys.   
+*                              I looked at making it possible to use auto-increment
+*                              keys at the same time as instances running program-
+*                              generated keys. It doesn't appear simple to implement,
+*                              using the current methodology of program-generated
+*                              keys. MySQL appears to use MAX(ikey) or similar in
+*                              order to determine the next auto-increment key value.
+*                              So, although auto-increment may be at say "1001", as
+*                              soon as a non-autoinc key is added with a key of say 
+*                              "10011001", auto-increment will revert to the higher
+*                              sequence. While that could possibly be overcome, I
+*                              don't plan to spend a lot of time on that. Therefore,
+*                              if that situation occurs, the non auto-increment
+*                              instances will likely abort because of excessive errors.
+*                              
+*  01-Sep-2013                 Tidied up program generally and improved comments.
+*                               
 * ----------------------------------------------------------------------------------
 * 
 * The purpose of this program is to test the database driver, it is not
@@ -112,20 +141,22 @@ import 'package:sqljocky/sqljocky.dart';
 import 'package:sqljocky/utils.dart';
 ////import '../../sqljocky/lib/utils.dart';
 
-const int    I_TOTAL_PROMPTS    = 11;   // the total count of prompts
-const int    I_MAX_PROMPT       = 10;   // (data-entry 0 to 10)
-const int    I_MAX_PARAM        = 9;    // maximum parameter number (0 to 9)
+const int    I_TOTAL_PROMPTS    = 13;   // the total count of prompts
+const int    I_MAX_PROMPT       = 12;   // (data-entry 0 to 10)
+const int    I_MAX_PARAM        = 11;    // maximum parameter number (0 to 9)
 const int    I_DB_USER          = 0;    // prompt nr
 const int    I_DB_PWD           = 1;    // prompt nr
 const int    I_DB_NAME          = 2;    // prompt nr
 const int    I_MAX_INSERTS      = 3;    // prompt nr
-const int    I_USE_AUTOINC      = 4;    // prompt nr
-const int    I_MAX_UPDATES      = 5;    // prompt nr
-const int    I_SELECT_SIZE      = 6;    // prompt nr
-const int    I_CLEAR_YN         = 7;    // prompt nr
-const int    I_SAVE_YN          = 8;    // prompt nr
-const int    I_INSTANCE_TOT     = 9;    // prompt nr
-final int    I_CORRECT_YN       = 10;   // prompt nr
+const int    I_INS_ROLLBACKS    = 4;    // prompt nr
+const int    I_USE_AUTOINC      = 5;    // prompt nr
+const int    I_MAX_UPDATES      = 6;    // prompt nr
+const int    I_UPD_ROLLBACKS    = 7;    // prompt nr
+const int    I_SELECT_SIZE      = 8;    // prompt nr
+const int    I_CLEAR_YN         = 9;    // prompt nr
+const int    I_SAVE_YN          = 10;   // prompt nr
+const int    I_INSTANCE_TOT     = 11;   // prompt nr
+final int    I_CORRECT_YN       = 12;   // prompt nr
 
 const int    I_DEC_PLACES       = 2;    // For Currency
 const int    I_TOT_OPEN         = 0;    // for 'totals' table
@@ -158,23 +189,26 @@ void main() {
  */
   List<String> lsInput = ogTerminalInput.fGetUserSelections();
     
-  bool          tClearMainTable  = (lsInput[I_CLEAR_YN] == "y");
+  bool          tClearMainTable     = (lsInput[I_CLEAR_YN] == "y");
   bool          tFirstInstance;
-  bool          tUseAutoInc      = (lsInput[I_USE_AUTOINC] == "y");
-  ClassTotals   oClassTotals     = new ClassTotals();
-  ClassWrapInt  oiClassInt       = new ClassWrapInt();
-  ClassWrapList ollClassList     = new ClassWrapList();  
-  int           iInstanceMax     = int.parse(lsInput[I_INSTANCE_TOT]);
+  bool          tInsertsAborted;
+  bool          tUseAutoInc         = (lsInput[I_USE_AUTOINC] == "y");
+  ClassTotals   oClassTotals        = new ClassTotals();
+  ClassWrapInt  oiClassInt          = new ClassWrapInt();
+  ClassWrapList ollClassList        = new ClassWrapList();
+  int           iInsertRollbackFreq = int.parse(lsInput[I_INS_ROLLBACKS]);
+  int           iInstanceMax        = int.parse(lsInput[I_INSTANCE_TOT]);
   int           iInstanceNr;
-  int           iMaxInserts      = int.parse(lsInput[I_MAX_INSERTS]);
-  int           iSelectMax       = int.parse(lsInput[I_SELECT_SIZE]);
-  String        sUsername        = lsInput[I_DB_USER];
-  String        sPassword        = lsInput[I_DB_PWD];
-  String        sDatabase        = lsInput[I_DB_NAME];
+  int           iMaxInserts         = int.parse(lsInput[I_MAX_INSERTS]);
+  int           iSelectMax          = int.parse(lsInput[I_SELECT_SIZE]);
+  int           iUpdateRollbackFreq = int.parse(lsInput[I_UPD_ROLLBACKS]);
+  String        sUsername           = lsInput[I_DB_USER];
+  String        sPassword           = lsInput[I_DB_PWD];
+  String        sDatabase           = lsInput[I_DB_NAME];
  
-  /*
-   * attempt to connect to database
-   */
+/*
+ * attempt to connect to database
+ */
   ogPrintLine.fPrintForce ("Attempting DB Connection");
   try {    
     ogDb = new ConnectionPool(host: S_DB_HOST, port: 3306,
@@ -184,18 +218,18 @@ void main() {
     fFatal(null, "Main", "Unable to connect to MySql");
   }
     
-  /*
-   * Test Connection
-   */
+/*
+ * Test Connection
+ */
   fTestDbConnection()
   .catchError((oError) =>
     fFatal(null, "Main:fTestDbConnection", "Db not connected"))
   .then((tResult) {
     if (tResult != true)
       fFatal(null, "Main:fTestDbConnection", "Database not connected");
-    /*
-     * Test if first instance of program
-     */  
+/*
+ * Test if first instance of program
+ */  
     return fCheckIfFirstInstance();
   })
   .catchError((oError) =>
@@ -209,20 +243,19 @@ void main() {
       throw("This should be the first instance, however "+
       " there is an instance already running");
     
-    /*
-     * Create tables (controlling (first) instance)
-     */
+/*
+ * Create tables (controlling (first) instance)
+ */
     return !tFirstInstance ? true : fCreateTablesEtc (tClearMainTable);    
   })
-  .catchError((oError) => throw(oError))
   .then((tResult) {
     if (tResult != true)
       fFatal(null, "Main", "Invalid result from fCreateTablesEtc - ${tResult}");
-    /*
-     * Wait for controlling instance to complete initialization. All
-     * but the 'controlling' instance wait for the 'controlling' instance
-     * to complete initialization.
-     */
+/*
+ * Wait for controlling instance to complete initialization. All
+ * but the 'controlling' instance wait for the 'controlling' instance
+ * to complete initialization.
+ */
     return tFirstInstance ? true :
       fWaitForProcess(sColumn: "iCount1", sCompareType: ">",
                       iRequiredValue: 0, sWaitReason: "to initialize",
@@ -231,10 +264,10 @@ void main() {
   .then((tResult) {
     if (tResult != true)
       fFatal(null, "Main:fWaitForProcess", "Process did not complete");
-    /*
-     * Update Control table then wait for all instances to start
-     */
-    // after the 1st instance does this update, the others also do
+/*
+ * Update Control table then wait for all instances to start
+ * after the 1st instance does this update, the others also do
+ */
     int iRequiredCount = tFirstInstance ? 0 : -1;  // 1st instance must be first
     return fUpdateControlTableColumn(sColumn: "iCount1",
                                      iRequiredCount: iRequiredCount,
@@ -247,9 +280,9 @@ void main() {
     if (tFirstInstance && iInstanceNr != 1)
       fFatal(null, "Main:fUpdateControlTableColumn",
              "This is first instance, however instance nr. = ${iInstanceNr}");
-    /*
-     * wait for All instances to Start
-     */
+/*
+ * wait for All instances to Start
+ */
     return fWaitForProcess(sColumn: "iCount1", sCompareType: "=", 
                            iRequiredValue: iInstanceMax,
                            sWaitReason: "to start",
@@ -257,25 +290,28 @@ void main() {
   }).then((bool tResult) {
     ogPrintLine.fPrintForce ("Started processing at ${new DateTime.now()}");
     print ("");
-    /*
-     * When all instances have started Process Main Inserts
-     */ 
+
+ /*
+ * When all instances have started Process Main Inserts
+ */ 
     return fProcessMainInserts(iInstanceNr, iMaxInserts, tUseAutoInc,
-                               oClassTotals);
+                               oClassTotals, iInsertRollbackFreq);
   }).then((bool tResult) {
-    if (tResult != true)
+    if (tResult != true && tResult != false)
       fFatal(null, "Main:fProcessMainInserts", "Process failed. Result = (${tResult})");
-    /*
-     * Print and Update totals
-     */
+    tInsertsAborted = tResult;
+
+/*
+ * Print and Update totals for Inserts
+ */
     oClassTotals.fPrint();
     return fInsertIntoTotalsTable(oClassTotals);
   }).then((bool tResult) {
     if (tResult != true)
       fFatal(null, "Main:fInsertIntoTotalsTable", "Process failed, Result = ${tResult}");
-    /*
-     * Update 'control' to show inserts have completed
-     */
+/*
+ * Update 'control' to show inserts have completed
+ */
     return fUpdateControlTableColumn(sColumn: "iCount2",
                                      iRequiredCount: -1,
                                      iMaxCount: iInstanceMax,
@@ -284,9 +320,10 @@ void main() {
   }).then((bool tResult) {
     if (tResult != true)
       fFatal(null, "Main:fUpdateControlTableColumn", "Process failed. Result = ${tResult}");
-    /*
-     * wait for All processes to complete main Inserts
-     */
+
+/*
+ * wait for All processes to complete main Inserts
+ */
     return fWaitForProcess(sColumn: "iCount2",
                            sCompareType: "=",
                            iRequiredValue: iInstanceMax,
@@ -296,18 +333,18 @@ void main() {
   }).then((bool tResult) {
     if (tResult != true)
       fFatal(null, "Main:fWaitForProcess", "Process failed. Result = ${tResult}");
-    /*
-     * Create List of random keys
-     */
+/*
+ * Create List of random keys
+ */
     print;
     ogPrintLine.fPrintForce("Insert table of random keys");
     return !tFirstInstance ? true : fInsertRandomKeys(iSelectMax);
   }).then((tResult) {
     if (tResult != true)
       fFatal (null, "Main", "failure to create random keys");
-    /*
-     * first instance only to update control table to show random keys created  
-     */
+/*
+ * first instance only to update control table to show random keys created  
+ */
     return !tFirstInstance ? true :    
       fUpdateControlTableColumn(sColumn: "iCount3", 
                                 iRequiredCount: 0, 
@@ -317,9 +354,9 @@ void main() {
   }).then((bool tResult) {
     if (tResult != true)
       fFatal(null, "Main:fUpdateControlTable", "Process did not complete");
-    /*
-     * Wait for random key table to be created
-     */
+/*
+ * Wait for random key table to be created
+ */
     return fWaitForProcess(sColumn: "iCount3", sCompareType: ">",
                             iRequiredValue: 0, sWaitReason:
                             "to propagate random key table", tStart:true);
@@ -327,13 +364,13 @@ void main() {
   }).then((bool tResult) {
     if (tResult != true)
       fFatal(null, "Main:fWaitForProcess", "(iCount3) Process failed. Result = ${tResult}");
-    /*
-     * Select random table for keys to use for updates
-     */
+/*
+ * Select random table for keys to use for updates
+ */
     ogPrintLine.fPrintForce("Selecting random keys from random table");
     print("");
     String sSql = "SELECT ikey FROM random";
-    return fProcessSqlSelect(sSql, false, ollClassList);    /////xxxx    
+    return fProcessSqlSelect(sSql, false, ollClassList);    
   }).then((bool tResult) {
     if (tResult != true)
       fFatal(null, "Main:fProcessSqlSelect", "(random) Process failed. Result = ${tResult}");
@@ -343,25 +380,25 @@ void main() {
     if ((lliRandKeys == null || lliRandKeys.length == 0) && iMaxUpdates > 0)
       fFatal(null, "On Return from Selecting Random Keys",
        "No List of keys created");
-    /*
-     * Process Main Updates using random keys
-     */
+/*
+ * Process Main Updates using random keys
+ */
     return fProcessMainUpdates(iInstanceNr, iMaxUpdates, lliRandKeys,
-                               oClassTotals);
+                               oClassTotals, iUpdateRollbackFreq);
   }).then((bool tResult) {
     if (tResult != true)
       fFatal(null, "Main:fProcessMainUpdates", "Process failed. Result = (${tResult})"); 
-    /*
-     * Print and Update totals
-     */
+/*
+ * Print and Update totals
+ */
     oClassTotals.fPrint();
     return fInsertIntoTotalsTable(oClassTotals);
   }).then((bool tResult) {
     if (tResult != true)
       fFatal(null, "Main:fInsertIntoTotalsTable", "Process failed. Result = ${tResult}");
-    /*
-     * Select Main Table (unsorted)
-     */
+/*
+ * Select Main Table (unsorted)
+ */
     print ("");
     ogPrintLine.fPrintForce ("Processing Select (Unsorted)");
     String sSql = "SELECT * FROM ${S_MAIN_TABLE}";
@@ -370,18 +407,18 @@ void main() {
     if (tResult != true)
       fFatal(null, "Main:fProcessSqlSelect", "(unsorted) Process failed. Result = ${tResult}");
     print("");
-    /*
-     * Select Table (sorted)
-     */
+/*
+ * Select Table (sorted)
+ */
     ogPrintLine.fPrintForce ("Processing Select (Sorted)");
     String sSql = "SELECT * FROM ${S_MAIN_TABLE} ORDER BY ikey";
     return fProcessSqlSelect (sSql, true, null);
   }).then((bool tResult) {
     if (tResult != true)
       fFatal(null, "Main:fProcessSqlSelect", "(sorted) Process failed. Result = ${tResult}");
-    /*
-     * Update control row to increment count of instances finished
-     */
+/*
+ * Update control row to increment count of instances finished
+ */
     return fUpdateControlTableColumn(sColumn: "iCount4", 
                                      iRequiredCount: -1, 
                                      iMaxCount: iInstanceMax,
@@ -389,9 +426,9 @@ void main() {
   }).then((bool tResult) {
     if (tResult != true)
       fFatal(null, "Main:fUpdateControlTableColumn", "(iCount4) Process failed. Result = ${tResult}");      
-    /*
-     * wait for All processes to Finish
-     */
+/*
+ * wait for All processes to Finish
+ */
     print ("");
     return fWaitForProcess(sColumn: "iCount4",
                            sCompareType: "=",
@@ -402,46 +439,72 @@ void main() {
   }).then((bool tResult) {
     if (tResult != true)
       fFatal(null, "Main:fWaitForProcess", "(iCount4) Process failed. Result = ${tResult}");
-    /*
-     * Display and compare totals to ensure they balance.
-     */
+/*
+ * Display and compare totals to ensure they balance.
+ */
     print ("");
     return fDisplayTotals();
   }).then((tResult) {
     if (tResult != true)
       fFatal(null, "Main:fDisplayTotals", "Failed to complete");
     ogPrintLine.fPrintForce ("Completed");
+    if (tInsertsAborted) {
+      print ("**** Note: Inserting of Rows was aborted! ****");
+    }
     fExit(0);
-  }).catchError((oError) => fFatal(null, "Main", "${oError}"));
+  })
+  .catchError((oError) =>
+    fFatal(null, "Main", "${oError}"));
 }
 
 /*
- * Process Inserts To Main Table
+ ***** Process Inserts To Main Table ****
  */
 async.Future<bool> fProcessMainInserts(int iInstanceNr, int iMaxUpdates,
-                                      bool tUseAutoInc, ClassTotals oClassTotals) {
+                                      bool tUseAutoInc, ClassTotals oClassTotals,
+                                      int iRollbackFreq) {
   async.Completer<bool> oCompleter = new async.Completer<bool>();
   
-  ClassWrapList ollClassList   = new ClassWrapList();
-  int           iCcyInsertTot  = 0;
-  int           iDiv           = fGetDivisor(iMaxUpdates);  // for progress indic.
-  int           iInsertTotNr   = 0;
-  int           iInsertFailTot = 0;
-  int           iLastIdTot     = 0;
-  int           iLastLog       = 0;
-  Function      fLoop;
+  bool          tAbort           = false; 
+  ClassWrapList ollClassList     = new ClassWrapList();
+  ClassWrapString osClassString  = new ClassWrapString();
+  int           iCcyInsertTot    = 0;
+  int           iDiv             = fGetDivisor(iMaxUpdates);  // for progress indic.
+  int           iDupKeyTot       = 0;
+  int           iInsertTotNr     = 0;
+  int           iInsertFailTot   = 0;
+  int           iInsertRollbacks = 0;
+  int           iLastIdTot       = 0;
+  int           iLastLog         = 0;
+  Function      fLoopInserts;
   Stopwatch oStopwatch = new Stopwatch();
   
-  fLoop = () {
+  fLoopInserts = () {
     if (iInsertTotNr % iDiv == 0 && iInsertTotNr != iLastLog) {
       stdout.write ("${iInsertTotNr}  ");
       iLastLog = iInsertTotNr;
-    }   
-    if (iInsertTotNr >= iMaxUpdates) {   // all done
+    }
+    if (iInsertFailTot > 100 && iInsertFailTot > (iInsertTotNr + iInsertRollbacks)) {
+      print ("**** fProcessMainInserts: ${iInsertFailTot} Inserts have failed, "+
+             "${iInsertTotNr} have succeeded ****");
+      print ("Aborting Inserts");
+      tAbort = true;
+    }
+
+    if (iInsertTotNr >= iMaxUpdates || tAbort) {   // all done
       oStopwatch.stop;
       print("");
       
-      ogPrintLine.fPrintForce("Failed Inserts (system stress) = ${iInsertFailTot}");
+      if (iInsertFailTot - iDupKeyTot > 0) {
+        ogPrintLine.fPrintForce("Failed Inserts (system stress?) = "+
+                                "${iInsertFailTot}");
+      } else {
+        ogPrintLine.fPrintForce("Failed Inserts = "+
+            "${iInsertFailTot}");
+      }
+      ogPrintLine.fPrintForce("Duplicate keys encountered = ${iDupKeyTot}");
+      if (iRollbackFreq > 0 || iInsertRollbacks > 0)
+        ogPrintLine.fPrintForce("Intentional Rollbacks = ${iInsertRollbacks}");
       print("");
       ogPrintLine.fPrintForce ("total valid Last Id's = ${iLastIdTot}");
       
@@ -452,44 +515,58 @@ async.Future<bool> fProcessMainInserts(int iInstanceNr, int iMaxUpdates,
                                iCcyTotAmt   : iCcyInsertTot,
                                iTotMillis   : oStopwatch.elapsedMilliseconds);
       
-      oCompleter.complete(true);
+      oCompleter.complete(tAbort);
       return;
     }
-    if (iInsertFailTot > 100 && iInsertFailTot > iInsertTotNr)
-      fFatal(null, "fProcessMainInserts", "${iInsertFailTot} "+
-      "Inserts have failed, ${iInsertTotNr} have succeeded");
     
     String sName    = ogRandNames.fGetRandName();
     int    iCcyBal  = ogRandAmt.fRandAmt(99999, (iInsertTotNr % 2 == 0));
     String sCcyBal  = ogCcy.fCcyIntToString(iCcyBal);
 
-    /*
-     * Don't use AutoInc
-     */
+/*
+ * Force a Rollback if selected
+ */  
+    bool tForceRollback = (iRollbackFreq > 0 && (iInsertRollbacks < 
+                           ((iInsertTotNr +1) / iRollbackFreq).toInt()));
+    if (tForceRollback) {
+      sCcyBal = "1234.aa";
+    }
+/*
+ * Don't use AutoInc
+ */
     if (!(tUseAutoInc)) {
       String sSql = "(iKey, sname, dbalance)"+
                      " VALUES (?, '$sName', $sCcyBal)"; 
 
-      fInsertRowWithSequence(S_MAIN_TABLE, S_SEQUENCE_KEY_MAIN, sSql)
+      fInsertRowWithSequence(S_MAIN_TABLE, S_SEQUENCE_KEY_MAIN, sSql,
+                             tForceRollback, osClassString)
       .then((tResult) {
-        if (tResult == false)
-          iInsertFailTot++;
-        else if (tResult == true){
+        if (tResult == true) {
           iInsertTotNr++;
           iCcyInsertTot += iCcyBal;
-        } else
+        } else if (tResult == false) {
+          throw("non-autoinc Insert failed");
+        } else {
           fFatal(null, "fProcessMainInserts", 
-              "Invalid response from fExecuteSql - ${tResult}"); 
-        fLoop();
+              "Invalid response from fExecuteSql - ${tResult}");
+        }
+        fLoopInserts();
       })
       .catchError((oError) {
-        print ("fProcessMainInserts: Insert failed - ${oError}");
-        iInsertFailTot++;
-        fLoop();
+        if (tForceRollback) {
+          iInsertRollbacks++;
+        } else {
+          iInsertFailTot++;
+          if (osClassString.sValue.contains("Error 1062")) {   // duplicate key
+            iDupKeyTot++;            
+          }
+          print ("fProcessMainInserts: Insert failed - ${oError}");
+        }
+        fLoopInserts();
       });
-    /*
-     * Do use AutoInc
-     */
+/*
+ * Do use AutoInc
+ */
     } else {
       String sSql = "INSERT INTO ${S_MAIN_TABLE} (sname, dbalance)"+
                      " VALUES ('$sName', $sCcyBal)";
@@ -501,8 +578,13 @@ async.Future<bool> fProcessMainInserts(int iInstanceNr, int iMaxUpdates,
           fFatal(null, "fProcessMainInserts", 
                   "Invalid response from fExecuteSql - ${tResult}");
         if (!(tResult)) {
-          iInsertFailTot++;
-          fLoop();
+          if (tForceRollback) {
+            iInsertRollbacks++;
+          } else {
+            iInsertFailTot++;
+            print ("Insert failed");
+          }
+          fLoopInserts();
         } else {
           iInsertTotNr++;
           iCcyInsertTot += iCcyBal;
@@ -517,35 +599,36 @@ async.Future<bool> fProcessMainInserts(int iInstanceNr, int iMaxUpdates,
               if (iKey > 0)
                 iLastIdTot++;
             }
-            fLoop();
+            fLoopInserts();
           });
         }
-      }).catchError((oError) {
-        print ("fProcessMainInserts: Insert failed - ${oError}");
-        iInsertFailTot++;
-        fLoop();
       });
     }
-  };
+  };  
   ogPrintLine.fWriteForce ("Processing Inserts .... ");
   oStopwatch.start();
-  fLoop();
+  fLoopInserts();
   return oCompleter.future;
 }  
 
 /*
- * Insert a Single Row into a table using program-generated sequence
- * number. 'sequences' table holds last number used for Key.
+ **** Insert a Single Row into a table using program-generated sequence ****
+ **** number. 'sequences' table holds last number used for Key.         ****
  */
 async.Future<bool> fInsertRowWithSequence (String sTableName,
-                          String sSequenceKey, String sSql1) {
+                          String sSequenceKey, String sSql1,
+                          bool tForceRollback, ClassWrapString osClassString) {
 
   async.Completer<bool> oCompleter = new async.Completer<bool>();  
 
 /////  fCheckTransactionStatus("fInsertRowWithSequence", true);
+  if (osClassString != null) {
+    osClassString.sValue = "";   // init
+  }
   var oTxn;
   String sNewKey;   // the new key to be inserted
-  ogDb.startTransaction().then((oResult) {
+  ogDb.startTransaction()
+  .then((oResult) {
     oTxn = oResult;
     String sSql2 = "SELECT iLastkey FROM sequences WHERE ikey = "+
                    "${sSequenceKey} FOR UPDATE";
@@ -553,34 +636,28 @@ async.Future<bool> fInsertRowWithSequence (String sTableName,
     .then((oResult){
       return oResult.stream.toList();
     })
-    .catchError((oError) => throw(oError))
     .then((llRows) {               
-      if (llRows == null || llRows.length != 1)  ////xxxxxx                 
+      if (llRows == null || llRows.length != 1)                 
         throw ("fInsertRowWithSequence: row '${sSequenceKey}' "+
                 "for table ${sTableName} is missing from "+
                 "'sequences' table");
       sNewKey = (llRows[0][0] +1).toString();
-       
+
       sSql1 = "INSERT INTO " +sTableName +(sSql1.replaceFirst(
           "?", sNewKey));
  
       return oTxn.query(sSql1);
     })
-    .catchError((oError) {
-      print ("Insert failed. sql  ${sSql1}");
-      throw(oError);
-    })
-    .then((oResult){
-      if (oResult.affectedRows != 1)   //////xxxxxx
+    .then((oResult) {
+      if (oResult.affectedRows != 1)
         throw ("Insert ${sTableName}: New Key = ${sNewKey}, "+
                 "rows affected Not 1 but = "+
                 "${oResult.affectedRows}");
       return oTxn.query("UPDATE sequences SET ilastkey = "+
                          "${sNewKey} WHERE ikey = ${sSequenceKey}");      
     })
-    .catchError((oError) => throw(oError))
     .then((oResult) {
-      if (oResult.affectedRows != 1)  /////xxxxxxxx
+      if (oResult.affectedRows != 1)
         throw ("Table ${sTableName}, Update "+
                 "Sequences: Rows Not 1 but = ${oResult.affectedRows}");
       
@@ -590,16 +667,18 @@ async.Future<bool> fInsertRowWithSequence (String sTableName,
         return;
 ////      fCheckTransactionStatus("fInsertRowWithSequence - after COMMIT", false);
 ////      return;
-      })
-      .catchError((oError) => throw(oError));
-    })
-    .catchError((oError) => throw(oError));
+      });
+    });
   })
   .catchError((oError) {
-    print ("\nfInsertRowWithSequence: table ${sTableName} Error = "+
-            "${oError}");
-    fRollback(oTxn).then((sResult){
-      print (sResult);
+    if (osClassString != null) {
+      osClassString.sValue = "${oError}";
+    }
+    if (!(tForceRollback)) {
+      print ("fInsertRowWithSequence: Table ${sTableName} - Insert failed. "+
+              "Key = ${sNewKey}, \nError = ${oError}");
+    }
+    fRollback(oTxn).then((tResult){
       oCompleter.complete(false);
     });
   });
@@ -608,19 +687,20 @@ async.Future<bool> fInsertRowWithSequence (String sTableName,
 }
 
 /*
- * Process Updates for Main Table using list of keys
+ ***** Process Updates for Main Table using list of keys ****
  */
 async.Future<bool> fProcessMainUpdates(int iInstanceNr, int iMaxUpdates, List lRandKeys,
-                                       ClassTotals oClassTotals) {
+                                       ClassTotals oClassTotals, int iRollbackFreq) {
   async.Completer<bool> oCompleter = new async.Completer<bool>();
   
   Function  fLoop;
-  int       iCcyUpdateTot  = 0;
-  int       iDiv           = fGetDivisor(iMaxUpdates);  // Divisor for progress indicator
-  int       iUpdateTotNr   = 0;
-  int       iUpdateFailTot = 0;
-  Random    oRandom        = new Random();
-  Stopwatch oStopwatch     = new Stopwatch();
+  int       iCcyUpdateTot    = 0;
+  int       iDiv             = fGetDivisor(iMaxUpdates);  // Divisor for progress indicator
+  int       iUpdateTotNr     = 0;
+  int       iUpdateFailTot   = 0;
+  int       iUpdateRollbacks = 0;
+  Random    oRandom          = new Random();
+  Stopwatch oStopwatch       = new Stopwatch();
   
   if ((lRandKeys == null || lRandKeys.length < 1) && iMaxUpdates > 0)
     fFatal (null, "fProcessUpdates",
@@ -636,7 +716,10 @@ async.Future<bool> fProcessMainUpdates(int iInstanceNr, int iMaxUpdates, List lR
       print("");
       ogPrintLine.fPrintForce("Failed Updates (system stress or contention) "+
                                "= ${iUpdateFailTot}");
-
+      
+      if (iRollbackFreq > 0 || iUpdateRollbacks > 0)
+        ogPrintLine.fPrintForce("Intentional Rollbacks = ${iUpdateRollbacks}");      
+      
       print("");
       
       oClassTotals.fSetValues (iInstance    :  iInstanceNr,
@@ -651,15 +734,38 @@ async.Future<bool> fProcessMainUpdates(int iInstanceNr, int iMaxUpdates, List lR
     }
     int iKey = lRandKeys[oRandom.nextInt(lRandKeys.length)][0];
     int iCcyTranAmt = ogRandAmt.fRandAmt(999, (iUpdateTotNr % 2 == 0));
-    fUpdateMainRow(iKey, iCcyTranAmt)
+
+/*
+ * Force a Rollback if required
+ */
+    bool tForceRollback = (iRollbackFreq > 0 && (iUpdateRollbacks < 
+                           ((iUpdateTotNr+1) / iRollbackFreq).toInt()));
+    
+    fUpdateMainRow(iKey, iCcyTranAmt, tForceRollback)
     .then((tResult) {
-      if (!tResult)
-        iUpdateFailTot ++;
-      else {
-        if (++iUpdateTotNr % iDiv == 0)
-          stdout.write("${iUpdateTotNr}   ");
+      if (tResult) {
+        if (tForceRollback) {
+          fFatal(null, "fProcessMainUpdates", "Update Rollback forced, "+
+          "but update succeeded");
+        }
         iCcyUpdateTot += iCcyTranAmt;
-      }  
+        if (++iUpdateTotNr % iDiv == 0) {
+          stdout.write("${iUpdateTotNr}   ");        
+        }
+      } else {
+        if (tForceRollback) {
+          iUpdateRollbacks++;
+        } else {
+          iUpdateFailTot++;
+          print ("Update failed");
+        }
+        if (iUpdateFailTot > 100 &&
+            iUpdateFailTot > iUpdateTotNr) {
+          fFatal(null, "fProcessMainUpdates", "${iUpdateFailTot} "+
+                       "updates have failed, and only "+
+                       "${iUpdateTotNr} have succeeded");
+        }
+      }
       fLoop();
     });
   };
@@ -668,56 +774,70 @@ async.Future<bool> fProcessMainUpdates(int iInstanceNr, int iMaxUpdates, List lR
 }  
 
 /*
- * Update a Single Row of Main Table
+ ***** Update a Single Row of Main Table ****
  */
-async.Future<bool> fUpdateMainRow(int iKey, int iCcyTranAmt) {
+async.Future<bool> fUpdateMainRow(int iKey, int iCcyTranAmt, bool tForceRollback) {
   async.Completer<bool> oCompleter = new async.Completer<bool>();
   var oTxn;
+  String sCcyTranAmt  = ogCcy.fCcyIntToString(iCcyTranAmt);
   
-  ogDb.startTransaction().then((oTransaction) {
+  ogDb.startTransaction()
+  .then((oTransaction) {
     oTxn = oTransaction;
     String sSql = "SELECT ikey, dbalance FROM ${S_MAIN_TABLE} WHERE iKey = "+
      "${iKey} FOR UPDATE";
     return oTxn.query(sSql)
     .then((oResult){
       return oResult.stream.toList();
-    }).catchError((oError) => throw(oError))
-    .then((llRows) {
+    })
+    .then((List<List> llRows) {
       if (llRows == null || llRows.length != 1)
         fFatal(oTxn, "Update Data", "Select failed. Rows = ${llRows}");
       String sKey         = "${llRows[0][0]}";       
       double dBalOld      = llRows[0][1];
       String sCcyTranAmt  = ogCcy.fCcyIntToString(iCcyTranAmt);
-      double dBalNew      = ogCcy.fAddCcyDoubles(dBalOld, double.parse(sCcyTranAmt));
-      String sBalNew   = dBalNew.toStringAsFixed(I_DEC_PLACES);
-      String sSql = "UPDATE test01 SET dBalance = $sBalNew " +
-       "WHERE ikey = $sKey";
-      return oTxn.query(sSql).then((oResult) {
-        if (oResult.affectedRows != 1) {
-          print ("Update failed - rows affected = ${oResult.affectedRows}");
-          print ("Sql = "+sSql);
-          fRollback(oTxn).then((sResult){
-            print (sResult+", Value = "+sCcyTranAmt);
-            oCompleter.complete(false);
-            return;
-          });
-        } else {
-          oTxn.commit().then((_) {
-            oCompleter.complete(true);
-          });
+      double dBalNew      = ogCcy.fAddCcyDoubles(dBalOld,
+                                                 double.parse(sCcyTranAmt));
+      String sBalNew      = dBalNew.toStringAsFixed(I_DEC_PLACES);
+      if (tForceRollback)   // cause a Rollback
+        sBalNew = "1234.aa";
+      String sSql         = "UPDATE test01 SET dBalance = $sBalNew " +
+                            "WHERE ikey = $sKey";
+      return oTxn.query(sSql);
+    })
+    .then((oResult) {
+      if (oResult.affectedRows == 1) {
+        if (tForceRollback) {
+          fFatal (null, "fUpdateMainRow", "Rollback being forced, "+
+                  "however update succeeded");
         }
-      }).catchError((oError) => throw(oError));
-    }).catchError((oError) => throw(oError));
-  }).catchError((oError) {
-    print ("fUpdateMainRow: Update failed - ${oError}");
-    oCompleter.complete(false);
+        oTxn.commit()
+        .then((_) =>
+          oCompleter.complete(true));
+      } else {  
+        print ("Update failed - rows affected = ${oResult.affectedRows}");
+        print ("Sql = "+sSql);
+        fRollback(oTxn).then((tResult){
+          oCompleter.complete(false);
+          return;
+        });
+      }
+    });
+  })
+  .catchError((oError) {
+    if (!(tForceRollback)) {
+      print ("fUpdateMainRow: Update failed - ${oError}");
+    }
+    fRollback(oTxn).then((tResult){
+      oCompleter.complete(false);
+    });
   });
  
   return oCompleter.future; 
 }
       
 /*
- * Select The Table
+ **** Select a Table ****
  */
 async.Future<bool> fProcessSqlSelect (String sSql, bool tShowTime,
                                       ClassWrapList ollResult) {
@@ -727,57 +847,57 @@ async.Future<bool> fProcessSqlSelect (String sSql, bool tShowTime,
   oStopwatch.start();
   ogDb.query(sSql)
   .then((oResult){
-    return oResult.stream.toList()
-    .then((llRows) {
-      if (ollResult != null)
-        ollResult.llValue = llRows;
-      oStopwatch.stop();
-      if (llRows.length < 1)
-        ogPrintLine.fPrintForce ("Select failed to return any rows");
-      int iTotRows = llRows.length;
-      int iMillis = oStopwatch.elapsedMilliseconds;
-      String sElapsed = (iMillis/1000).toStringAsFixed(2);
-      if (tShowTime) {
-        ogPrintLine.fPrintForce ("Total rows selected = $iTotRows, "+
-         "elapsed = $sElapsed seconds");
+    return oResult.stream.toList();
+  })
+  .then((llRows) {
+    if (ollResult != null)
+      ollResult.llValue = llRows;
+    oStopwatch.stop();
+    if (llRows.length < 1)
+      ogPrintLine.fPrintForce ("Select failed to return any rows");
+    int iTotRows = llRows.length;
+    int iMillis = oStopwatch.elapsedMilliseconds;
+    String sElapsed = (iMillis/1000).toStringAsFixed(2);
+    if (tShowTime) {
+      ogPrintLine.fPrintForce ("Total rows selected = $iTotRows, "+
+       "elapsed = $sElapsed seconds");
       
-        if (iTotRows > 0) {
-          sElapsed = (iMillis/iTotRows).toStringAsFixed(4);
+      if (iTotRows > 0) {
+        sElapsed = (iMillis/iTotRows).toStringAsFixed(4);
     
-          ogPrintLine.fPrintForce ("Average elapsed milliseconds = "+
-           sElapsed);
-        }
+        ogPrintLine.fPrintForce ("Average elapsed milliseconds = "+
+         sElapsed);
       }
-      oCompleter.complete(true);
-      return;
-    });
-  }).catchError((oError) {
-    fFatal(null, "fProcessSqlSelect", "${oError}");
-  });
+    }
+    oCompleter.complete(true);
+    return;
+  }).catchError((oError) =>
+    fFatal(null, "fProcessSqlSelect", "${oError}"));
 
   return oCompleter.future;  
 }
 
 /*
- * Rollback Transaction
+ **** Rollback Transaction ****
  */
-async.Future<String> fRollback(Transaction oTxn) {
-  async.Completer<String> oCompleter = new async.Completer<String>();
+async.Future<bool> fRollback(Transaction oTxn) {
+  async.Completer<bool> oCompleter = new async.Completer<bool>();
   if (oTxn == null) {
-    oCompleter.complete("No Rollback required");
+    oCompleter.complete(true);
   } else { 
-    print ("Attempting Rollback");
+////    print ("Attempting Rollback");
     oTxn.rollback().then((_) {
-      oCompleter.complete("Rollback Completed");
+      oCompleter.complete(true);
     }).catchError((oError) {
-      oCompleter.complete("Rollback failed - ${oError}");
+      print ("Rollback failed. Error = ${oError}");
+      oCompleter.complete(false);
     });
   }
   return oCompleter.future;
 }
 
 /*
- * Connect To Database
+ **** Connect To Database ****
  */
 async.Future<bool> fConnectToDb(String sDbHost, String sUsername,
                                 String sPassword, String sDatabase) {
@@ -800,7 +920,7 @@ async.Future<bool> fConnectToDb(String sDbHost, String sUsername,
 }
 
 /*
- * Test Db Connection
+ **** Test Db Connection ****
  */
 async.Future<bool> fTestDbConnection() {
   async.Completer<bool> oCompleter = new async.Completer<bool>();
@@ -810,14 +930,16 @@ async.Future<bool> fTestDbConnection() {
   String sSql = "DROP TABLE IF EXISTS testmy001";
   
   fExecuteSql(sSql, "testmy001", "fTestDbConnection", -1, false)
-  .catchError((oError) => oCompleter.complete(false))
-  .then((tResult) => oCompleter.complete(tResult));
+  .catchError((oError) =>
+    oCompleter.complete(false))
+  .then((tResult) =>
+    oCompleter.complete(tResult));
   
   return oCompleter.future;
 }  
 
 /*
- * Insert the List of random keys into table for selection
+ **** Insert the List of random keys into 'random' table for selection ****
  */
 async.Future<bool> fInsertRandomKeys(int iSelectMax) {
   async.Completer<bool> oCompleter = new async.Completer<bool>();
@@ -838,8 +960,9 @@ async.Future<bool> fInsertRandomKeys(int iSelectMax) {
       if (tResult == true)
         iPos++;
       fLoopRandomInserts();
-    }).catchError((oError) =>
-        throw ("fInsertRandomKeys: (${iPos}) ${oError}"));
+    })
+    .catchError((oError) =>
+      throw ("fInsertRandomKeys: (${iPos}) ${oError}"));
   };
   
   String sSql = "SELECT ikey FROM ${S_MAIN_TABLE} ORDER BY RAND() " +
@@ -859,27 +982,26 @@ async.Future<bool> fInsertRandomKeys(int iSelectMax) {
   
     oCompleter.complete(true);
     
-  }).catchError((oError) => fFatal(null, "fInsertRandomKeys", "${oError}"));
+  })
+  .catchError((oError) =>
+    fFatal(null, "fInsertRandomKeys", "${oError}"));
   
   return oCompleter.future;
 }
 
 /*
- * Fatal Error Encountered
+ **** Fatal Error Encountered ****
  */
 void fFatal(Transaction oTxn, String sCheckpoint, String sError) {
   print ("Fatal error. $sCheckpoint. Error = $sError");
-  if (oTxn != null) {
-    fRollback(oTxn).then ((sResult){
-      print (sResult);
-    }).catchError((oError) => print ("fFatal: error in Rollback = ${oError}"));
-  }
-  print ("Program terminated");
-  fExit(1);
+  fRollback(oTxn).then ((tResult){
+    print ("Program terminated");
+    fExit(1);
+  });
 }
 
 /*
- * Update Control Table with counter to handle synchronization.
+ **** Update Control Table with counter to handle synchronization. ****
  */
 async.Future<bool> fUpdateControlTableColumn({String sColumn,
                                             int iRequiredCount,
@@ -895,12 +1017,13 @@ async.Future<bool> fUpdateControlTableColumn({String sColumn,
                  "ikey = $S_CONTROL_KEY FOR UPDATE";
   var oTxn;
 
-  ogDb.startTransaction().then((oResult) {
+  ogDb.startTransaction()
+  .then((oResult) {
     oTxn = oResult;
     return oTxn.query(sSql)
     .then((oResult){
       return oResult.stream.toList();
-    }).catchError((oError) => throw(oError))
+    })
     .then((llRows) {
       if (llRows == null || llRows.length != 1)
         fFatal(oTxn, "fUpdateControlTableColumn",
@@ -920,34 +1043,23 @@ async.Future<bool> fUpdateControlTableColumn({String sColumn,
 
       return oTxn.query(sSql);
     })
-    .catchError((oError) => throw(oError)) 
     .then((oResult) {
       if (oResult.affectedRows != 1)
         throw ("fUpdateControlTableColumn: Rows affected = "+
                 "${oResult.affectedRows}, should = 1");
       
-      return oTxn.commit()
-      .catchError((oError) => throw(oError))
-      .then((_){
-        if (oiResult != null)
-          oiResult.iValue = iCount;
-        oCompleter.complete(true);
-        return;
-      });
+      return oTxn.commit();
     })
-    .catchError((oError) => throw(oError));
-////    .then((_) {
-    
-      ////fCheckTransactionStatus("fUpdateControlTableColumn - after COMMIT",
-      ////                         false);
-
-////      oCompleter.complete(iCount);
-
+    .then((_){
+      if (oiResult != null)   // then result is wanted
+        oiResult.iValue = iCount;
+      oCompleter.complete(true);
+      return;
+    });
   })
   .catchError((oError) =>
-      fFatal(oTxn, "fUpdateControlTableColumn",
-              "${oError} - Sql = $sSql"));
-////  });
+    fFatal(oTxn, "fUpdateControlTableColumn",
+          "${oError} - Sql = $sSql"));
 
   return oCompleter.future; 
 }
@@ -958,7 +1070,6 @@ async.Future<bool> fUpdateControlTableColumn({String sColumn,
 * waiting for a required number (of processes) to have completed
 * their update.
 */
-
 async.Future<bool> fWaitForProcess({String sColumn,
                                    String sCompareType,
                                    int iRequiredValue,
@@ -972,12 +1083,12 @@ async.Future<bool> fWaitForProcess({String sColumn,
   int           iLoopCount = 0;
   
   fWaitLoop = () {
-    /*
-     * The sleep is only one second in order that there is not an
-     * excessive wait after all are "ready". This could be handled
-     * better (using this methodology), but it would be a little more
-     * complex. I'll likely change this.
-     */
+/*
+ * The sleep is only one second in order that there is not an
+ * excessive wait after all are "ready". This could be handled
+ * better (using this methodology), but it would be a little more
+ * complex. I'll likely change this.
+ */
     new async.Timer(new Duration(seconds:1), () {
       String sSql = "Select ${sColumn} from control where ikey = "+
                      "$S_CONTROL_KEY";
@@ -1015,8 +1126,9 @@ async.Future<bool> fWaitForProcess({String sColumn,
         }
         iLoopCount++;
         fWaitLoop();
-      }).catchError((oError) =>
-          fFatal (null, "fWaitForProcess", "${oError}"));
+      })
+      .catchError((oError) =>
+        fFatal (null, "fWaitForProcess", "${oError}"));
     });
   };
   fWaitLoop();
@@ -1076,9 +1188,9 @@ async.Future<bool> fDisplayTotals() {
     if (tResult != true)
       fFatal(null, "fDisplayTotals",
              "Select of ${S_MAIN_TABLE} failed. Result = ${tResult}");
-    /*
-     * Display totals from select of main table
-     */
+/*
+ * Display totals from select of main table
+ */
     List<List> llRows = ollClassList.llValue;
     if (llRows == null || llRows.length < 1)
       fFatal(null, "fDisplayTotals",
@@ -1095,16 +1207,16 @@ async.Future<bool> fDisplayTotals() {
        "Balances = ${sCcyTot1}");
     
     return true;
-  }).then((_) {   
- 
-    /*
-     * / Display totals from select of totals table
-     */
-    
+  })
+  .then((_) {   
+  
+/*
+ *  Display totals from select of totals table
+ */    
     int    iRowTot2  = 0;       // init
     double dCcyTot2  = 0.0;     // init
 
-    sSql = "SELECT sum(iInsertNr), sum(dccyvalue) FROM totals"; ///xxxxxx
+    sSql = "SELECT sum(iInsertNr), sum(dccyvalue) FROM totals";
     fProcessSqlSelect(sSql, false, ollClassList)
     .then((bool tResult) {
       if (tResult != true)
@@ -1140,18 +1252,26 @@ async.Future<bool> fDisplayTotals() {
       oCompleter.complete(true);
       return;
     });
-  }).catchError((oError) => fFatal (null, "fDisplayTotals", "${oError}"));
+  })
+  .catchError((oError) =>
+    fFatal (null, "fDisplayTotals", "${oError}"));
   
   return oCompleter.future;
 }
 
 /*
- * create if necessary the tables and data used by this program.
+ ***** create if necessary the tables and data used by this program. ****
  */
 async.Future<bool> fCreateTablesEtc (bool tClearMainTable) { 
   async.Completer<bool> oCompleter = new async.Completer<bool>();
 
+  const int I_MIN_KEY_MAIN = 10011000;
+  
   ClassWrapList ollClassList  = new ClassWrapList();
+  
+/*
+ * Create 'control' Table
+ */
   String sSql = "CREATE TABLE IF NOT EXISTS control "+
       "(iKey int Primary Key not null unique, "+
       "icount1 int not null, icount2 int not null, "+
@@ -1159,11 +1279,15 @@ async.Future<bool> fCreateTablesEtc (bool tClearMainTable) {
       "icount5 int not null, icount6 int not null)";
   
   fExecuteSql(sSql, "control", "fCreateTables", -1, true)
-  .catchError((oError) => throw("Create 'control' - ${oError}"))
+  .catchError((oError) =>
+    throw("Create 'control' - ${oError}"))
   .then((bool tResult) {   
     if (tResult != true)
       fFatal(null, "fCreateTablesEtc", "failed to create 'control' table");
   
+/*
+ * Delete row from 'control' table (later inserted)
+ */
     sSql = "DELETE FROM control WHERE ikey = ${S_CONTROL_KEY}";
   
     return fExecuteSql (sSql, "control", "fCreateTables", -1, true);
@@ -1171,17 +1295,23 @@ async.Future<bool> fCreateTablesEtc (bool tClearMainTable) {
   .then((bool tResult) {
     if (tResult != true)
       fFatal(null, "fCreateTablesEtc", "failed to delete 'control' row");
+/*
+ * Insert required row into 'control' table
+ */
     sSql = "INSERT INTO control (ikey, icount1, icount2, "+
             "icount3, icount4, icount5, icount6) "+
             "VALUES ($S_CONTROL_KEY,0,0,0,0,0,0)";
   
     return fExecuteSql(sSql, "control", "fInsertSingleControlRow", 1, true);
   })
-  .catchError((oError) => throw("Insert into 'control'"))
+  .catchError((oError) =>
+    throw("Insert into 'control'"))
   .then((bool tResult){
     if (tResult != true)
       fFatal(null, "fCreateTables", "Unable to Insert into 'control'");
-    // test01 table //
+/*
+ *  Create Main table used for Inserts and Updates
+ */
     sSql = "CREATE TABLE IF NOT EXISTS ${S_MAIN_TABLE} "+
             "(ikey int Primary Key not null unique AUTO_INCREMENT, "+
             "sname varchar(22) not null, "+
@@ -1190,9 +1320,12 @@ async.Future<bool> fCreateTablesEtc (bool tClearMainTable) {
     var querier = new QueryRunner(ogDb, [sSql]);
     return querier.executeQueries();
   })
-  .catchError((oError) => throw("Create '${S_MAIN_TABLE}' - ${oError}"))
+  .catchError((oError) =>
+    throw("Create '${S_MAIN_TABLE}' - ${oError}"))
   .then((_) {
-  // Sequences table //
+/*
+ * Create 'sequences' table    
+ */
     sSql = "CREATE TABLE IF NOT EXISTS sequences "+
             "(iKey int Primary Key not null unique, "+
             "ilastkey int not null, stablename varchar(20) not null)";
@@ -1200,17 +1333,23 @@ async.Future<bool> fCreateTablesEtc (bool tClearMainTable) {
     var querier = new QueryRunner(ogDb, [sSql]);
     querier.executeQueries();
   })
-  .catchError((oError) => throw("Create 'sequences' - ${oError}"))
+  .catchError((oError) =>
+    throw("Create 'sequences' - ${oError}"))
   .then((_) {
-   // random table //
+/*
+ * Create 'random' table
+ */
     sSql = "CREATE TABLE IF NOT EXISTS random "+
             "(iKey int Primary Key not null unique)";
     var querier = new QueryRunner(ogDb, [sSql]);
     querier.executeQueries();
   })
-  .catchError((oError) => throw("Create 'random' - ${oError}")) 
+  .catchError((oError) =>
+    throw("Create 'random' - ${oError}")) 
   .then((_) {
-    // totals table //
+/*
+ *  Create 'totals' table
+ */
     sSql = "CREATE TABLE IF NOT EXISTS totals "+
             "(iKey int Primary Key not null unique, "+
             "iinstancenr int not null, itottype TINYINT NOT NULL, "
@@ -1221,68 +1360,99 @@ async.Future<bool> fCreateTablesEtc (bool tClearMainTable) {
     var querier = new QueryRunner(ogDb, [sSql]);
     querier.executeQueries();
   })
-  .catchError((oError) => throw("Create 'random' - ${oError}")) 
-  .then((_) {     
+  .catchError((oError) =>
+    throw("Create 'random' - ${oError}")) 
+  .then((_) { 
+/*
+ * Clean Main table if selected    
+ */
     return !tClearMainTable ? true :
       fExecuteSql("TRUNCATE TABLE ${S_MAIN_TABLE}",
                    S_MAIN_TABLE, "fCreateTablesEtc", -1, true);
   })
-  .catchError((oError) => throw("Clear '${S_MAIN_TABLE}' ${oError}"))
+  .catchError((oError) =>
+     throw("Clear '${S_MAIN_TABLE}' ${oError}"))
   .then((bool tResult) {
     if (tResult != true)
       fFatal(null, "fCreateTablesEtc", "failed to Clear "+
                     "'${S_MAIN_TABLE}' table");
+/*
+ * Clear the 'random' table used for keys to use in update
+ */
     return fExecuteSql("TRUNCATE TABLE random", "random",
                         "fCreateTablesEtc", -1, true);
    })
-   .catchError((oError) => throw("Truncate 'random' table ${oError}"))
+   .catchError((oError) =>
+     throw("Truncate 'random' table ${oError}"))
    .then((bool tResult) {
      if (tResult != true)
        fFatal(null, "fCreateTablesEtc",
               "failed to Clear 'random' table"); 
+/*
+ * Clear the 'totals' table
+ */
      return fExecuteSql("TRUNCATE TABLE totals", "totals",
                       "fCreateTablesEtc", -1, true);
    })
-   .catchError((oError) => throw("Truncate 'totals' - ${oError}"))
+   .catchError((oError) =>
+     throw("Truncate 'totals' - ${oError}"))
    .then((bool tResult) {
      if (tResult != true)
        fFatal(null, "fCreateTablesEtc",
                      "failed to Truncate 'totals' table");
-    
-    // Check that required sequences rows exist //
+/*
+ *  Delete the rows used for program-generated keys (then re-inserted)
+ */
     sSql = "DELETE FROM sequences WHERE ikey = "+
             "$S_SEQUENCE_KEY_MAIN OR iKey = $S_SEQUENCE_KEY_TOTALS";
 
     return ogDb.query(sSql);    
   })
-  .catchError((oError) => throw("Delete 'sequences' - ${oError}")) 
-  .then((_) {            
+  .catchError((oError) =>
+    throw("Delete 'sequences' - ${oError}")) 
+  .then((_) {
+/*
+ *  Insert into 'sequences' table the row 'totals' program-generated keys
+ */
     sSql = "INSERT INTO sequences (ikey, iLastKey, stablename) "+
             "VALUES ($S_SEQUENCE_KEY_TOTALS, 1000, 'totals')";
     return fExecuteSql(sSql, "sequences", "fCreateTablesEtc", 1, true);
   }) 
-  .catchError((oError) => throw("Insert 'sequences' ${oError}"))
+  .catchError((oError) =>
+    throw("Insert 'sequences' for 'totals' ${oError}"))
   .then((_) {
+/*
+ *  Select from the Main table the last key used (for program-generated keys)
+ */    
     sSql = "SELECT MAX(iKey) FROM ${S_MAIN_TABLE}";
     return fProcessSqlSelect (sSql, false, ollClassList);
   })
-  .catchError((oError) => throw("Insert 'sequences' - ${oError}")) 
+  .catchError((oError) =>
+    throw("Insert 'sequences' - ${oError}")) 
   .then((bool tResult) {
     if (tResult != true)
       fFatal(null, "fCreateTablesEtc",
              "Select of max key from ${S_MAIN_TABLE}) failed. Result = ${tResult}");
     List<List<int>> lliResult = ollClassList.llValue;
-    String sLastKey = "1001000";  // init
+    int iLastKey = 0;  // init
     if (lliResult != null && lliResult.length > 0
-        && lliResult[0][0] != null)
-      sLastKey = lliResult[0][0].toString();   
-  
+        && lliResult[0][0] != null) {
+      iLastKey = lliResult[0][0];   
+    }
+    
+    if (iLastKey < I_MIN_KEY_MAIN) {
+      iLastKey = I_MIN_KEY_MAIN;
+    }
+/*
+ *  Insert into 'sequences' table the row for main table program-generated keys
+ */        
     sSql = "INSERT INTO sequences (ikey, iLastKey, stablename) "+
-            "VALUES ($S_SEQUENCE_KEY_MAIN, ${sLastKey}, '${S_MAIN_TABLE}')";
+            "VALUES ($S_SEQUENCE_KEY_MAIN, ${iLastKey}, '${S_MAIN_TABLE}')";
 
     return fExecuteSql(sSql, "sequences", "fCreateTablesEtc", 1, true);
   })
-  .catchError((oError) => throw("Insert 'sequences' ${oError}"))
+  .catchError((oError) =>
+    throw("Insert 'sequences' ${oError}"))
   .then((tResult) {
     if (tResult != true)
       fFatal(null, "fCreateTablesEtc", "Unable to Insert into "+
@@ -1290,13 +1460,14 @@ async.Future<bool> fCreateTablesEtc (bool tClearMainTable) {
     return fInsertOpeningTotals(0);
   })
   .then((_) { oCompleter.complete(true); })
-  .catchError((oError) => fFatal(null, "fCreateTablesEtc", "${oError}"));
+  .catchError((oError) =>
+    fFatal(null, "fCreateTablesEtc", "${oError}"));
  
   return oCompleter.future;
 }
 
 /*
- * Insert opening values into 'totals' table
+ **** Insert opening values into 'totals' table ****
  */
 async.Future<bool> fInsertOpeningTotals(int iInstanceNr) {
   
@@ -1348,8 +1519,9 @@ async.Future<bool> fInsertOpeningTotals(int iInstanceNr) {
         fFatal(null, "fCreateTablesEtc", "Insert into totals (Opening) failed");
       oCompleter.complete(tResult);
       return;
-    }).catchError((oError) => throw(oError));
-  }).catchError((oError) {
+    });
+  })
+  .catchError((oError) {
     fFatal(null, "fInsertOpeningTotals", "${oError}");
   });
        
@@ -1357,7 +1529,7 @@ async.Future<bool> fInsertOpeningTotals(int iInstanceNr) {
 }
 
 /*
- * Insert into 'totals' table values from inserts and updates
+ **** Insert into 'totals' table values from inserts and updates ****
  */
 async.Future<bool> fInsertIntoTotalsTable(ClassTotals oClassTotals) {
   
@@ -1365,51 +1537,51 @@ async.Future<bool> fInsertIntoTotalsTable(ClassTotals oClassTotals) {
 
 ////  fCheckTransactionStatus("fInsertIntoTotalsTable", true);
   
-  String sSql = oClassTotals.fFormatSql();
+  String sSql   = oClassTotals.fFormatSql();
   
-  fInsertRowWithSequence("totals", S_SEQUENCE_KEY_TOTALS, sSql)
-  .catchError((oError) => throw(oError))
+  fInsertRowWithSequence("totals", S_SEQUENCE_KEY_TOTALS, sSql, false, null)
   .then((tResult) {
     if (tResult != true)
       throw("Insert failed");
     else
       oCompleter.complete(true);
-  }).catchError((oError) => fFatal(null, "fInsertIntoTotalsTable", "${oError}"));
+  })
+  .catchError((oError) =>
+    fFatal(null, "fInsertIntoTotalsTable", "${oError}"));
   
   return oCompleter.future;  
 }
 
 /*
- * Execute a single SQL string supplied.
+ **** Execute a single SQL string supplied. ****
  */
 async.Future<bool> fExecuteSql(String sSql, String sTableName,
     String sCalledBy, int iRequiredRows, bool tShowError) {
     
   async.Completer<bool> oCompleter = new async.Completer<bool>();
 
-////  fCheckTransactionStatus("fExeceuteSql:${sCalledBy}:", true);
+////  fCheckTransactionStatus("fExecuteSql:${sCalledBy}:", true);
   var oTxn;
     
   ogDb.startTransaction()
   .then((oResult) {
     oTxn = oResult;
     return oTxn.query(sSql)
-    .catchError((oError) => throw(oError))
     .then((oResult) {
       if (iRequiredRows > -1 && oResult.affectedRows != iRequiredRows)
         throw("Rows affected = ${oResult.affectedRows}");
       return oTxn.commit();
     })
-    .catchError((oError) => throw(oError))
-    .then((_) => oCompleter.complete(true));
+    .then((_) =>
+      oCompleter.complete(true));
   })
   .catchError((oError) {
     if (tShowError)
       print ("Error in fExecuteSql: table ${sTableName}, "+
               "called by ${sCalledBy}, Error = ${oError}");
-    fRollback(oTxn).then((sResult) {
+    fRollback(oTxn).then((tResult) {
       if (tShowError)
-        print (sResult);
+        print ("Update failed and Rollback completed");
       oCompleter.complete(false);
     });
   });  
@@ -1417,14 +1589,16 @@ async.Future<bool> fExecuteSql(String sSql, String sTableName,
 }
   
 /*
- * Attempt to connect to specific port to determine if first process.
+ **** Attempt to connect to specific port to determine if first process. ****
  */
 async.Future<bool> fCheckIfFirstInstance() {
   async.Completer<bool> oCompleter = new async.Completer<bool>(); 
-  RawServerSocket.bind("127.0.0.1", 8087).then((oSocket) {
+  RawServerSocket.bind("127.0.0.1", 8087)
+  .then((oSocket) {
     ogSocket = oSocket;         // assign to global
     oCompleter.complete(true);
-  }).catchError((oError) {
+  })
+  .catchError((oError) {
     oCompleter.complete(false);
   });
   
@@ -1432,7 +1606,7 @@ async.Future<bool> fCheckIfFirstInstance() {
 }
 
 /*
- * Class To Store and Print Totals
+ **** Class To Store and Print Totals
  */
 class ClassTotals{
   int    _iInstance;
@@ -1462,9 +1636,9 @@ class ClassTotals{
     if (_iTotMillis > 0 && iTotNr > 0)
       sAverageMillis = ", Avg Millis = "
                         +(_iTotMillis / iTotNr).toStringAsFixed(2);
-    String sValue = ogFormatCcy.fFormatCcy(ogCcy.fCcyIntToDouble(_iCcyTotAmt));
+    String sFmtCcy = ogFormatCcy.fFormatCcy(ogCcy.fCcyIntToDouble(_iCcyTotAmt));
   
-    String sPline = "${sTotDesc}, Nr: ${iTotNr}, Val: ${sValue}"+sAverageMillis;
+    String sPline = "${sTotDesc}, Nr: ${iTotNr}, Val: ${sFmtCcy}"+sAverageMillis;
     ogPrintLine.fPrintForce(sPline);
   }
   
@@ -1479,7 +1653,7 @@ class ClassTotals{
 }
 
 /*
- * Class to handle currency as double, integer, and string 
+ **** Class to handle currency as double, integer, and string 
  */
 class ClassCcy {
   int    _iDecPlaces;
@@ -1509,7 +1683,7 @@ class ClassCcy {
 }
 
 /*
- * Format Currency Value with punctuation (probably not needed with intl)
+ **** Class to format Currency Value with punctuation (probably not needed with intl)
 */
 class ClassFormatCcy {
   int    _iDecPlaces;
@@ -1547,7 +1721,7 @@ class ClassWrapInt {
   
   int  get iValue => _iValue;
   
-  void set iValue(int iValue) {_iValue = iValue;}
+  void set iValue(int iNewValue) {_iValue = iNewValue;}
 }
 
 class ClassWrapList {
@@ -1557,11 +1731,21 @@ class ClassWrapList {
   
   List<List> get llValue => _llValue;
   
-  void       set llValue(List<List> llValue) {_llValue = llValue;}
+  void       set llValue(List<List> llNewValue) {_llValue = llNewValue;}
+}
+
+class ClassWrapString {
+  String _sValue;
+  
+  ClassWrapString() {}
+  
+  String get sValue => _sValue;
+  
+  void   set sValue(String sNewValue) {_sValue = sNewValue;}
 }
 
 /*
- * Class To Print a single line To Console (can probably go)
+ **** Class To Print a single line To Console (can probably go)
  */
 class ClassPrintLine {
   bool   _tPrint;
@@ -1596,7 +1780,7 @@ class ClassPrintLine {
 }
 
 /*
- * Class to Create Random Names For Inserts
+ **** Class to Create Random Names For Inserts
  */
 class ClassRandNames {
   int     _iNamesUsed;
@@ -1613,9 +1797,9 @@ class ClassRandNames {
     _iNamesUsed = 0;
   }
   
-  /*
-   * Get a Single Random Name
-   */
+/*
+ * Get a Single Random Name
+ */
   String fGetRandName() {   // Get a new name from list
     int iPos;
     for (bool tUsed = true; tUsed;) {
@@ -1634,7 +1818,7 @@ class ClassRandNames {
 }
 
 /*
- *   Exit this program
+ ****   Exit this program ****
  */
 void fExit(int iCode) {
   if (ogDb != null)
@@ -1644,7 +1828,7 @@ void fExit(int iCode) {
 }
 
 /*
- * ClassTerminalInput : Class specific to this application for terminal input
+ **** ClassTerminalInput : Class specific to this application for terminal input
  */
 class ClassTerminalInput {
   List<String>   _lsHeading           = new List(6);
@@ -1656,40 +1840,46 @@ class ClassTerminalInput {
   ClassConsole   _oClassConsole       = new ClassConsole();         // general class
    
   ClassTerminalInput() {
-    _lsPrompts[I_DB_USER]      = "Database User Name .............. : ";
-    _lsPrompts[I_DB_PWD]       = "Database User Password .......... : ";
-    _lsPrompts[I_DB_NAME]      = "Database Name ................... : ";
-    _lsPrompts[I_MAX_INSERTS]  = "Number of Insert Iterations ..... : ";
-    _lsPrompts[I_USE_AUTOINC]  = "Use AutoInc for Inserts (y/n) ... : ";
-    _lsPrompts[I_MAX_UPDATES]  = "Number of Update Iterations ..... : ";    
-    _lsPrompts[I_SELECT_SIZE]  = "Select sample-size for updates .. : ";
-    _lsPrompts[I_CLEAR_YN]     = "Clear Table? (y/n) .............. : ";
-    _lsPrompts[I_SAVE_YN]      = "Save selections to file? (y/n) .. : ";
-    _lsPrompts[I_INSTANCE_TOT] = "Nr. of instances you will run ... : ";
-    _lsPrompts[I_CORRECT_YN]   = "Details Correct? (y/n/end) ...... : ";
+    _lsPrompts[I_DB_USER]       = "Database User Name .............. : ";
+    _lsPrompts[I_DB_PWD]        = "Database User Password .......... : ";
+    _lsPrompts[I_DB_NAME]       = "Database Name ................... : ";
+    _lsPrompts[I_MAX_INSERTS]   = "Number of Insert Iterations ..... : ";
+    _lsPrompts[I_INS_ROLLBACKS] = "Frequency of Insert Rollbacks ... : ";    
+    _lsPrompts[I_USE_AUTOINC]   = "Use AutoInc for Inserts (y/n) ... : ";
+    _lsPrompts[I_MAX_UPDATES]   = "Number of Update Iterations ..... : ";
+    _lsPrompts[I_UPD_ROLLBACKS] = "Frequency of Update Rollbacks ... : ";    
+    _lsPrompts[I_SELECT_SIZE]   = "Select sample-size for updates .. : ";
+    _lsPrompts[I_CLEAR_YN]      = "Clear Table? (y/n) .............. : ";
+    _lsPrompts[I_SAVE_YN]       = "Save selections to file? (y/n) .. : ";
+    _lsPrompts[I_INSTANCE_TOT]  = "Nr. of instances you will run ... : ";
+    _lsPrompts[I_CORRECT_YN]    = "Details Correct? (y/n/end) ...... : ";
     
-    _lsFieldNames[I_DB_USER]      = "Database User Name";
-    _lsFieldNames[I_DB_PWD]       = "Database User Password";
-    _lsFieldNames[I_DB_NAME]      = "Database Name";
-    _lsFieldNames[I_MAX_INSERTS]  = "Number of Insert Iterations";
-    _lsFieldNames[I_USE_AUTOINC]  = "Use AutoInc for Inserts (y/n)";
-    _lsFieldNames[I_MAX_UPDATES]  = "Number of Update Iterations";
-    _lsFieldNames[I_SELECT_SIZE]  = "Select sample-size for Updates";
-    _lsFieldNames[I_CLEAR_YN]     = "Clear Table? (y/n)";
-    _lsFieldNames[I_SAVE_YN]      = "Save selections to file? (y/n)";
-    _lsFieldNames[I_INSTANCE_TOT] = "Number of instances you will run";
+    _lsFieldNames[I_DB_USER]       = "Database User Name";
+    _lsFieldNames[I_DB_PWD]        = "Database User Password";
+    _lsFieldNames[I_DB_NAME]       = "Database Name";
+    _lsFieldNames[I_MAX_INSERTS]   = "Number of Insert Iterations";
+    _lsFieldNames[I_INS_ROLLBACKS] = "Frequency of Insert Rollbacks";    
+    _lsFieldNames[I_USE_AUTOINC]   = "Use AutoInc for Inserts (y/n)";
+    _lsFieldNames[I_MAX_UPDATES]   = "Number of Update Iterations";
+    _lsFieldNames[I_UPD_ROLLBACKS] = "Frequency of Update Rollbacks";    
+    _lsFieldNames[I_SELECT_SIZE]   = "Select sample-size for Updates";
+    _lsFieldNames[I_CLEAR_YN]      = "Clear Table? (y/n)";
+    _lsFieldNames[I_SAVE_YN]       = "Save selections to file? (y/n)";
+    _lsFieldNames[I_INSTANCE_TOT]  = "Number of instances you will run";
  
-    _lliMinMax[I_DB_USER]      = [1];
-    _lliMinMax[I_DB_PWD]       = [1];
-    _lliMinMax[I_DB_NAME]      = [1];
-    _lliMinMax[I_MAX_INSERTS]  = [0, 1000000];
-    _lliMinMax[I_USE_AUTOINC]  = [1];
-    _lliMinMax[I_MAX_UPDATES]  = [0, 1000000];
-    _lliMinMax[I_SELECT_SIZE]  = [1, 1000];
-    _lliMinMax[I_CLEAR_YN]     = [1];
-    _lliMinMax[I_SAVE_YN]      = [1];
-    _lliMinMax[I_INSTANCE_TOT] = [1,999];
-    _lliMinMax[I_CORRECT_YN]   = [1];
+    _lliMinMax[I_DB_USER]       = [1];
+    _lliMinMax[I_DB_PWD]        = [1];
+    _lliMinMax[I_DB_NAME]       = [1];
+    _lliMinMax[I_MAX_INSERTS]   = [0, 1000000];
+    _lliMinMax[I_INS_ROLLBACKS] = [0, 10000];    
+    _lliMinMax[I_USE_AUTOINC]   = [1];
+    _lliMinMax[I_MAX_UPDATES]   = [0, 1000000];
+    _lliMinMax[I_UPD_ROLLBACKS] = [0, 10000];   
+    _lliMinMax[I_SELECT_SIZE]   = [1, 1000];
+    _lliMinMax[I_CLEAR_YN]      = [1];
+    _lliMinMax[I_SAVE_YN]       = [1];
+    _lliMinMax[I_INSTANCE_TOT]  = [1,999];
+    _lliMinMax[I_CORRECT_YN]    = [1];
     
     _llsAllowableEntries[I_USE_AUTOINC] = ["y", "n"];
     _llsAllowableEntries[I_CLEAR_YN]    = ["y", "n"];
@@ -1698,7 +1888,9 @@ class ClassTerminalInput {
     
     List<String> _lsDataTypes = new List(I_MAX_PROMPT+1);
     _lsDataTypes[I_MAX_INSERTS]   = "int";
-    _lsDataTypes[I_MAX_INSERTS]   = "int";
+    _lsDataTypes[I_INS_ROLLBACKS] = "int";    
+    _lsDataTypes[I_MAX_UPDATES]   = "int";
+    _lsDataTypes[I_UPD_ROLLBACKS] = "int";    
     _lsDataTypes[I_SELECT_SIZE]   = "int";
     _lsDataTypes[I_INSTANCE_TOT]  = "int";
        
@@ -1715,9 +1907,9 @@ class ClassTerminalInput {
                          _lliMinMax);
   }
 
-  /*
-   * ClassTerminalInput: Prompt User for parameters
-   */
+/*
+ * ClassTerminalInput: Prompt User for parameters
+ */
   List<String> fGetUserSelections() {
     int  iDisplayLine;
     String sOldStartTime;
@@ -1738,7 +1930,7 @@ class ClassTerminalInput {
     _oClassConsole.fDisplayInput(iPromptNr-1, lsInput);  // display previous lines
 
     bool tValid = false;    
-    while (!tValid) {
+    while (!(tValid)) {
       _oClassConsole.fGetUserInput(iPromptNr, lsInput, "end");
       
       print ("\n\n\n");     
@@ -1767,11 +1959,14 @@ class ClassTerminalInput {
                  "must be entered");
       }
       
-      if (tValid) {                  
-        try {
-          int iTemp = int.parse(lsInput[I_INSTANCE_TOT]);
-          tValid = (iTemp > 0);
-        } catch (oError) {tValid = false;}
+      if (tValid) {
+        int iTemp = int.parse(lsInput[I_INSTANCE_TOT], onError: (_) {
+          tValid = false;
+        });
+     ////   try {
+     ////     int iTemp = int.parse(lsInput[I_INSTANCE_TOT]);
+     ////     tValid = (iTemp > 0);
+     ////   } catch (oError) {tValid = false;}
 
         if (!tValid) {
           print ("Invalid - at least one instance must run");
@@ -1792,9 +1987,9 @@ class ClassTerminalInput {
     return lsInput;
   }
   
-  /*
-   * ClassTerminalInput: Check if parameters entered are valid
-   */
+/*
+ * ClassTerminalInput: Check if parameters entered are valid
+ */
   int _fValidateParams(List<String> lsInput, bool tChangeTime) {    
     int iMax = I_INSTANCE_TOT;
     for (int iPos = 0; iPos <= I_INSTANCE_TOT; iPos++) {
@@ -1804,9 +1999,9 @@ class ClassTerminalInput {
     return I_MAX_PROMPT;
   }
   
-  /*
-   * ClassTerminalInput: if no alterations, re-read file
-   */
+/*
+ * ClassTerminalInput: if no alterations, re-read file
+ */
   bool _fCheckFileValues (List<String> lsInput, List<String> lsSavedParams) {
 
     bool tAltered = false;
@@ -1847,7 +2042,7 @@ class ClassTerminalInput {
 }
 
 /*
- * ClassConsole - Class to Handle Console Input
+ **** ClassConsole - Class to Handle Console Input
  */
 class ClassConsole {
   int            _iMaxPrompt;
@@ -1920,7 +2115,8 @@ class ClassConsole {
     
     String sInput = _fReadConsoleLine(iPromptNr, sDefault, "end");
 
-    if (sTerminate != "" && sInput == sTerminate) {
+    if (sTerminate != "" && (sInput == sTerminate ||
+        sInput.toLowerCase() == sTerminate)) {
       fExit(0);
     } else if (sInput == "<") {
       iPromptNr -= 2;
@@ -1930,9 +2126,9 @@ class ClassConsole {
     return ++iPromptNr;                  // increment prompt number
    }
   
-  /*
-   * ClassConsole - Read Single Console Line
-   */
+/*
+ * ClassConsole - Read Single Console Line
+ */
   String _fReadConsoleLine(int iPromptNr, String sDefault,
                             String sTerminate) {
     
@@ -1968,7 +2164,8 @@ class ClassConsole {
       
       String sErrorLine = "";      
       try {
-        if (sInput == sTerminate) {
+        if (sTerminate != "" && (sInput == sTerminate ||
+            sInput.toLowerCase() == sTerminate)) {
         } else if (sInput == "<") {  // back one
         } else {
           sErrorLine = _fValidateSingleLine(iPromptNr, sInput);
@@ -1984,9 +2181,9 @@ class ClassConsole {
     }
   }
    
-  /*
-   * ClassConsole - Validate Single input
-   */
+/*
+ * ClassConsole - Validate Single input
+ */
   String _fValidateSingleLine (int iPromptNr, String sInput) {
     int iMinVal;
     int iMaxVal;
@@ -2013,10 +2210,10 @@ class ClassConsole {
     return sErrorLine;
   }
   
-  /*
-   * ClassConsole - Validate String Entered
-   */
-  String _fValidateString (String sInput, int iMinLgth, int iMaxLgth, List lAllowableEntries) {
+/*
+ * ClassConsole - Validate String Entered
+ */
+  String _fValidateString (String sInput, int iMinLgth, int iMaxLgth, List lsAllowableEntries) {
 
     if (iMinLgth != null && sInput.length < iMinLgth) {
       if (iMinLgth == 1)
@@ -2027,21 +2224,24 @@ class ClassConsole {
     if (iMaxLgth != null && iMaxLgth > 0 && sInput.length > iMaxLgth)
       return ("Invalid - maximum length for field is ${iMaxLgth}");
       
-    bool tValid = (lAllowableEntries == null || lAllowableEntries.length < 1);
-    for (int iPos = 0; !tValid && iPos < lAllowableEntries.length; iPos++)
-      tValid = (sInput == lAllowableEntries[iPos]);
+    bool tValid = (lsAllowableEntries == null || lsAllowableEntries.length < 1);
+    if (!tValid && lsAllowableEntries.length == 2 &&
+        lsAllowableEntries[0] == "y" && lsAllowableEntries[1] == "n")
+      sInput = sInput.toLowerCase();
+    for (int iPos = 0; !tValid && iPos < lsAllowableEntries.length; iPos++)
+      tValid = (sInput == lsAllowableEntries[iPos]);
 
-    if (!tValid)
-      return "Invalid - entry must be one of ${lAllowableEntries}";
-
-    return "";
+    return tValid ? "" : "Invalid - entry must be one of ${lsAllowableEntries}";
   }
  
-  /*
-   * ClassConsole - Validate Integer Entered
-   */
-  String _fValidateInt(String sInput, int iMinVal, int iMaxVal, List lAllowableEntries) {
+/*
+ * ClassConsole - Validate Integer Entered
+ */
+  String _fValidateInt(String sInput, int iMinVal, int iMaxVal, List lsAllowableEntries) {
     int iInput;
+////    iInput = int.parse(sInput, onError: (_) {
+////     return "Invalid - non-numeric entry - '$sInput'";
+////    });
     try {
       iInput = int.parse(sInput);
     } catch (oError) {
@@ -2052,16 +2252,16 @@ class ClassConsole {
     if (iMaxVal != null && iInput > iMaxVal)
       return "Invalid - Entry must not exceed ${iMaxVal}";
 
-    bool tValid = (lAllowableEntries == null || lAllowableEntries.length < 1);
-    for (int iPos = 0; !tValid && iPos < lAllowableEntries.length; iPos++)
-      tValid = (iInput == lAllowableEntries[iPos]);
+    bool tValid = (lsAllowableEntries == null || lsAllowableEntries.length < 1);
+    for (int iPos = 0; !tValid && iPos < lsAllowableEntries.length; iPos++)
+      tValid = (iInput == lsAllowableEntries[iPos]);
 
-    return ! tValid ? "Invalid - entry must be one of ${lAllowableEntries}" : "";
+    return (!(tValid)) ? "Invalid - entry must be one of ${lsAllowableEntries}" : "";
   }
     
-  /*
-   * ClassConsole: Save Selections to File
-   */
+/*
+ ** ClassConsole: Save Selections to File
+ */
   void fSaveParams(List<String> lsPrompts, List<String> lsInput,
     iMaxParams, sFileName) {
     String sFileBuffer = "";        // used to write to file
@@ -2074,9 +2274,9 @@ class ClassConsole {
     ogPrintLine.fPrintForce ("File written");
   }
   
-  /*
-   * ClassConsole: Read Parameters from File
-   */
+/*
+ * ClassConsole: Read Parameters from File
+ */
   List<String> fReadParamsFile(String sFileName, int iTotLines) {
     
     List<String> lsInput = new List(iTotLines);
@@ -2095,9 +2295,9 @@ class ClassConsole {
     return lsInput;
   }
   
-  /*
-   * ClassConsole: Read fixed-length String List from file
-   */
+/*
+ * ClassConsole: Read fixed-length String List from file
+ */
   int fReadFixedListSync(String sFileName, List<String> lsData) {
     int iLinesOnFile = 0;
     int iByte;
@@ -2119,14 +2319,14 @@ class ClassConsole {
       if (!(oError is FileException))
         throw ("fReadFixedListSync: Error = \n${oError}");
     }
-    // Make remaining lines (if any) Strings //
+// Make remaining lines (if any) Strings //
     for (int i=iLinesOnFile+1; i<=lsData.length; lsData[i-1] = "", i++);
     return iLinesOnFile;   // return actual line count
   }
   
-  /*
-   * Class Console : Validate all data in List
-   */
+/*
+ * Class Console : Validate all data in List
+ */
   int fValidateAllInput(List lsData, int iMaxPrompt) {
     int iPromptNr;
     for (iPromptNr = 0; iPromptNr <= iMaxPrompt; iPromptNr++) {
@@ -2137,9 +2337,9 @@ class ClassConsole {
     return iMaxPrompt +1;   // all valid
   } 
   
-  /*
-   * Class Console: Display Selections made by Operator
-   */
+/*
+ * Class Console: Display Selections made by Operator
+ */
   void fDisplayInput(iMaxPrompt, List<String> lsInput) {
     for (int i = 0; i < _lsHeading.length; print(_lsHeading[i]), i++);
     for (int iPos = 0; iPos <= iMaxPrompt; iPos++){
